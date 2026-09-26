@@ -1,0 +1,6 @@
+# Vendored libraries stay byte-for-byte as published; the spec records their SHA-256.
+brainmap/static/vendor/** -text
+
+# LF everywhere else; the Windows launcher keeps CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf

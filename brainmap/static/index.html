@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brain map</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/d3.v7.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span>brain map</div>
+  <nav class="seg" aria-label="Renderer">
+    <a href="/" aria-current="page" title="Canvas 2D, CPU">canvas</a>
+    <a href="/gpu" title="sigma.js, WebGL 2D">webgl 2d</a>
+    <a href="/3d" title="3d-force-graph, three.js WebGL">webgl 3d</a>
+    <a href="/orbit" title="Orbital disc, three.js WebGL, instanced">orbit</a>
+  </nav>
+  <label class="field"><span class="sr">Source</span><select id="source"></select></label>
+  <div class="seg" id="views" role="group" aria-label="View">
+    <button data-view="rings" title="Concentric rings by tier (1)">rings</button>
+    <button data-view="circle" title="Every node on one ring (2)">circle</button>
+    <button data-view="areas" title="One cluster per area (3)">areas</button>
+    <button data-view="links" title="Force layout (4)">links</button>
+    <button data-view="timeline" title="Snapshot runs and last change (5)">timeline</button>
+    <button data-view="orbit" title="Rotating 2.5D projection (6)">3d orbit</button>
+  </div>
+  <div class="seg" id="colorby" role="group" aria-label="Colour by">
+    <button data-color="area" title="Colour by area">area</button>
+    <button data-color="health" title="Colour by review status">health</button>
+  </div>
+  <input id="search" type="search" placeholder="find ( / )" autocomplete="off" spellcheck="false" aria-label="Find a node">
+  <div class="seg" role="group" aria-label="Display">
+    <button id="t-names" title="Show every label">names</button>
+    <button id="t-motion" title="Idle animation">motion</button>
+    <button id="t-fit" title="Fit to screen (f)">fit</button>
+    <button id="t-full" title="Full screen">full screen</button>
+    <button id="t-theme" title="Switch light / dark">light</button>
+  </div>
+  <div class="stamp" id="stamp" aria-live="polite"></div>
+</header>
+<main id="stage">
+  <canvas id="canvas" aria-label="Memory graph"></canvas>
+  <aside class="legend" id="legend" aria-label="Legend"></aside>
+  <aside class="card" id="card" hidden></aside>
+  <div class="tip" id="tip" hidden></div>
+  <section class="reader" id="reader" hidden aria-modal="true" role="dialog">
+    <header><span id="reader-path"></span><button id="reader-close" title="Close (Esc)">close</button></header>
+    <pre id="reader-text"></pre>
+  </section>
+  <div class="empty" id="empty" hidden></div>
+</main>
+</body>
+</html>

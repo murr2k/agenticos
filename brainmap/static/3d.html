@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brain map 3D</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/3d-force-graph-1.80.0.min.js" defer></script>
+<script src="/static/common.js" defer></script>
+<script src="/static/3d.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span>brain map</div>
+  <nav class="seg" aria-label="Renderer">
+    <a href="/" title="Canvas 2D, CPU">canvas</a>
+    <a href="/gpu" title="sigma.js, WebGL 2D">webgl 2d</a>
+    <a href="/3d" aria-current="page" title="3d-force-graph, three.js WebGL">webgl 3d</a>
+    <a href="/orbit" title="Orbital disc, three.js WebGL, instanced">orbit</a>
+  </nav>
+  <label class="field"><span class="sr">Source</span><select id="source"></select></label>
+  <div class="seg" id="colorby" role="group" aria-label="Colour by">
+    <button data-color="area">area</button>
+    <button data-color="health">health</button>
+  </div>
+  <input id="search" type="search" placeholder="find ( / )" autocomplete="off" spellcheck="false" aria-label="Find a node">
+  <div class="seg" role="group" aria-label="Display">
+    <button id="t-shells" title="Pull each tier onto its own shell: root, indexes, hot, cold">shells</button>
+    <button id="t-motion" title="Auto-rotate">motion</button>
+    <button id="t-fit" title="Fit (f)">fit</button>
+    <button id="t-theme" title="Switch light / dark">light</button>
+  </div>
+  <div class="stamp" id="stamp" aria-live="polite"></div>
+</header>
+<main id="stage">
+  <div id="graph" class="gl"></div>
+  <aside class="legend" id="legend" aria-label="Legend"></aside>
+  <aside class="card" id="card" hidden></aside>
+  <div class="banner" id="banner" hidden></div>
+  <section class="reader" id="reader" hidden aria-modal="true" role="dialog">
+    <header><span id="reader-path"></span><button id="reader-close" title="Close (Esc)">close</button></header>
+    <pre id="reader-text"></pre>
+  </section>
+  <div class="empty" id="empty" hidden></div>
+</main>
+</body>
+</html>

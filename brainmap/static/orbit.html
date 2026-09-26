@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brain map orbit</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">{"imports":{"three":"/static/vendor/three-0.183.2/three.module.min.js","three/addons/":"/static/vendor/three-0.183.2/addons/"}}</script>
+<script src="/static/common.js" defer></script>
+<script type="module" src="/static/orbit.js"></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span>brain map</div>
+  <nav class="seg" aria-label="Renderer">
+    <a href="/" title="Canvas 2D, CPU">canvas</a>
+    <a href="/gpu" title="sigma.js, WebGL 2D">webgl 2d</a>
+    <a href="/3d" title="3d-force-graph, three.js WebGL">webgl 3d</a>
+    <a href="/orbit" aria-current="page" title="Orbital disc, three.js WebGL, instanced">orbit</a>
+  </nav>
+  <label class="field"><span class="sr">Source</span><select id="source"></select></label>
+  <div class="seg" id="colorby" role="group" aria-label="Colour by">
+    <button data-color="area">area</button>
+    <button data-color="health">health</button>
+  </div>
+  <input id="search" type="search" placeholder="find ( / )" autocomplete="off" spellcheck="false" aria-label="Find a node">
+  <div class="seg" role="group" aria-label="Display">
+    <button id="t-top" title="Look straight down: the flat 2D rings view (t)">top</button>
+    <button id="t-stack" title="Lift each tier onto its own plane (s)">stack</button>
+    <button id="t-names" title="Label every node (n)">names</button>
+    <button id="t-glow" title="Bloom and area glow">glow</button>
+    <button id="t-motion" title="Slow orbit (m)">motion</button>
+    <button id="t-fit" title="Fit (f)">fit</button>
+    <button id="t-theme" title="Switch light / dark">light</button>
+  </div>
+  <div class="stamp" id="stamp" aria-live="polite"></div>
+</header>
+<main id="stage">
+  <div id="graph" class="gl"></div>
+  <aside class="legend" id="legend" aria-label="Legend"></aside>
+  <aside class="card" id="card" hidden></aside>
+  <div class="tip" id="tip" hidden></div>
+  <div class="banner" id="banner" hidden></div>
+  <section class="reader" id="reader" hidden aria-modal="true" role="dialog">
+    <header><span id="reader-path"></span><button id="reader-close" title="Close (Esc)">close</button></header>
+    <pre id="reader-text"></pre>
+  </section>
+  <div class="empty" id="empty" hidden></div>
+</main>
+</body>
+</html>
