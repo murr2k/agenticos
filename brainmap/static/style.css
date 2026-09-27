@@ -99,8 +99,15 @@ select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px s
 .seg button:last-child { border-right: 0; }
 .seg button:hover { background: var(--wash); color: var(--ink); }
 .seg button[aria-pressed="true"] { background: var(--raised); color: var(--ink); box-shadow: inset 0 -2px 0 var(--series-1); }
-.stamp { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The stamp takes what the bar leaves and truncates rather than wrapping, so
+   a live-update note never changes the header's height (and the stage's). */
+.stamp {
+  margin-left: auto; flex: 1 1 14em; min-width: 14em;
+  overflow: hidden; text-overflow: ellipsis; text-align: right;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 .stamp .stale { color: var(--warning); }
+.stamp .upd { color: var(--ink); }
 
 /* -- stage ----------------------------------------------------------------- */
 #stage { position: relative; flex: 1; min-height: 0; background: var(--surface); }
@@ -342,4 +349,15 @@ canvas:active { cursor: grabbing; }
   color: var(--ink-2);
   white-space: nowrap;
   text-shadow: 0 0 3px var(--surface), 0 0 3px var(--surface);
+}
+/* A hub or the root that changed in a live update; --pulse is set from the
+   page's TUNE block. */
+.hub.flash i, .rootlabel.flash { animation: bm-pulse var(--pulse, 900ms) ease-out infinite; }
+.rootlabel.flash { border-radius: 4px; }
+@keyframes bm-pulse {
+  from { box-shadow: 0 0 0 0 var(--ink); }
+  to { box-shadow: 0 0 0 9px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hub.flash i, .rootlabel.flash { animation: none; box-shadow: 0 0 0 2px var(--ink); }
 }

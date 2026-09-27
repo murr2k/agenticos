@@ -6,6 +6,51 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Live refresh. The server keeps one graph per source and rebuilds it in a
+  background watcher when the Claude Code hooks' marker file changes, when a
+  5-second stat walk of the stores finds a changed name, size or mtime, or
+  hourly so ages follow the clock. The version is a content hash; unchanged
+  rebuilds are discarded. New route `/api/version`; `--signal FILE` sets the
+  marker (default `~/.claude/memory.signal`).
+- All four pages poll `/api/version` every 2 s while visible, fetch the graph
+  only when it changes, keep camera, selection, isolation and search, and
+  flash the added and changed nodes (rings on canvas, highlight blink on
+  sigma, ink blink in 3D, an ink pulse on orbit with pulsing hub badges). The
+  header says what changed, and when the server stops answering or a rebuild
+  fails.
+- `build.fingerprint()`: a stat-only digest of every file the builder reads.
+- `docs/live-refresh-recipe.md`: build-and-verify recipe for the live refresh
+  (hooks, server, pages, tests), for rebuilding it from description only.
+- `scripts/autostart.ps1`: installs a per-user Scheduled Task that starts the
+  server windowless at logon (no administrator rights), with a one-minute
+  watchdog trigger that restarts it if it dies; `-Remove` uninstalls.
+- `--log FILE`: request and error logging to a rotating file (1 MB x 3).
+- A second launch that finds a brain map already on the port hands over to
+  it (opens the page if asked, exits 0) instead of failing.
+
+### Fixed
+
+- On Windows a second server could bind the same port alongside the first
+  and split requests between them; the socket is now exclusive.
+- Request logging and error reporting no longer depend on stderr, which does
+  not exist under `pythonw`.
+
+### Changed
+
+- The graph is no longer rebuilt on every request; `/api/brain` serves the
+  current cached graph and `/api/file` resolves nodes against it. The canvas
+  page's 60-second re-fetch is replaced by version polling.
+- The header stamp truncates with an ellipsis instead of wrapping, so notes
+  never change the header's height.
+
+### Security
+
+- `/api/file` also refuses a node whose file is a link that resolves to
+  anything but `.md` or `.py`.
+- Successful version polls are kept out of the request log.
+
 ## [0.1.0] - 2026-09-26
 
 First release: brain map, a read-only viewer for the tiered Markdown memory

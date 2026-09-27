@@ -34,8 +34,14 @@
      shape proportions are drawing detail and stay where they are drawn. */
   const TUNE = Object.freeze({
     data: {
-      refreshMs: 60000,             // re-fetch the graph while the tab is visible
       staleDays: 7,                 // a snapshot older than this is marked stale
+    },
+    live: {
+      pollMs: 2000,                 // ask the server for its version while the tab is visible
+      flashMs: 6000,                // changed nodes pulse this long after an update
+      pulseMs: 1000,                // one pulse
+      ringPx: 12,                   // how far a pulse ring grows
+      noteMs: 120000,               // "updated ..." stays in the header this long
     },
     node: {
       base: 3.2, slope: 1.7,        // radius = base + slope x sqrt(degree)
@@ -151,7 +157,8 @@
   let tween = { t0: 0, dur: 0 };
   let sim = null, simGraph = null, simHot = false;
   let orbitAngle = TUNE.orbit.startAngle, lastFrame = performance.now();
-  let dirty = true, refreshErr = null, sig = '';
+  let dirty = true;
+  let live = null, delta = null, flash = null;   // poll status, last change, pulsing nodes
   const drawMs = [];
 
   const store = {
@@ -236,14 +243,9 @@
     return base;
   }
 
-  function signature(d) {
-    return JSON.stringify([d.nodes.map((n) => [n.id, n.changed, n.flags.length, n.health]), d.links.length]);
-  }
-
   function ingest(data, first) {
     const old = new Map(nodes.map((n) => [n.id, n]));
     G = data;
-    sig = signature(data);
     nodes = data.nodes.map((d) => {
       const o = old.get(d.id);
       return Object.assign({}, d, {
@@ -297,23 +299,68 @@
     const data = await fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
     // A newer load started while this one was fetching; drop the stale graph.
     if (my !== loadSeq) return;
-    refreshErr = null;
+    delta = null; flash = null;
     ingest(data, first);
   }
 
-  async function refresh() {
-    if (document.hidden || !G) return;
-    const my = loadSeq;
-    try {
-      const data = await fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
-      if (my !== loadSeq) return;
-      refreshErr = null;
-      if (signature(data) !== sig) ingest(data, false);
-      else { G.meta = data.meta; G.activity = data.activity; renderStamp(); }
-    } catch (e) {
-      refreshErr = new Date();
-      renderStamp();
+  // -- live refresh (same contract as common.js on the WebGL pages) ----------
+  // A node apart from the clock: age, health and the half-life flag drift by
+  // themselves every day and are not a change to the memory.
+  const SIG_KEYS = ['kind', 'label', 'area', 'layer', 'tier', 'type', 'volatility', 'path', 'note', 'changed', 'lines'];
+  const nodeSig = (n) => JSON.stringify(SIG_KEYS.map((k) => (n[k] == null ? null : n[k]))
+    .concat([(n.flags || []).filter((f) => !/half-life/.test(f))]));
+  function diff(before, after) {
+    const old = new Map(before.map((n) => [n.id, nodeSig(n)]));
+    const added = [], changed = [], seen = new Set();
+    for (const n of after) {
+      seen.add(n.id);
+      const s = old.get(n.id);
+      if (s == null) added.push(n.id);
+      else if (s !== nodeSig(n)) changed.push(n.id);
     }
+    return { added, changed, removed: before.filter((n) => !seen.has(n.id)).map((n) => n.id), at: Date.now() };
+  }
+
+  // The server has a newer version: re-fetch it, keep the view (ingest tweens
+  // every node from where it was), and pulse what changed.
+  async function update() {
+    const my = loadSeq;
+    let data;
+    try {
+      data = await fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
+    } catch (e) {
+      return;                       // the next poll tries again
+    }
+    if (my !== loadSeq || !G) return;
+    const d = diff(G.nodes, data.nodes);
+    ingest(data, false);
+    delta = d;
+    const ids = new Set(d.added.concat(d.changed));
+    flash = ids.size ? { nodes: nodes.filter((n) => ids.has(n.id)), t0: performance.now() } : null;
+    dirty = true;
+  }
+
+  function follow() {
+    const st = { down: null, error: null };
+    let busy = false;
+    async function poll() {
+      if (document.hidden || busy || !G || !G.meta.version) return;
+      busy = true;
+      const src = S.src;
+      try {
+        const v = await fetchJSON('/api/version?src=' + encodeURIComponent(src));
+        st.down = null;
+        st.error = v.error || null;
+        if (src === S.src && v.version && v.version !== G.meta.version) await update();
+      } catch (e) {
+        if (!st.down) st.down = new Date();
+      } finally {
+        busy = false;
+      }
+    }
+    setInterval(poll, TUNE.live.pollMs);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+    return st;
   }
 
   // -- layouts -----------------------------------------------------------
@@ -880,6 +927,18 @@
       ctx.globalAlpha = a; ctx.lineWidth = w; ctx.strokeStyle = tok.ink;
       ctx.beginPath(); ctx.arc(n.sx, n.sy, n.sr + D.selectGap, 0, Math.PI * 2); ctx.stroke();
     }
+    if (flash) {
+      // Changed nodes after a live update: rings that grow and fade, fading
+      // out overall; a steady ring when reduced motion is asked for.
+      const Lv = TUNE.live, age = performance.now() - flash.t0;
+      const p = reduceMotion ? 0 : (age % Lv.pulseMs) / Lv.pulseMs;
+      ctx.lineWidth = 2; ctx.strokeStyle = tok.ink;
+      ctx.globalAlpha = Math.max(0, (1 - p) * (1 - age / Lv.flashMs));
+      for (const n of flash.nodes) {
+        if (n.sx == null) continue;
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, n.sr + D.selectGap + p * Lv.ringPx, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
     ctx.globalAlpha = 1;
   }
 
@@ -924,7 +983,8 @@
     if (!nodes.length || !W) return;
     const tweening = now - tween.t0 < tween.dur + 30;
     const idle = S.motion && S.view !== 'links' && S.view !== 'timeline';
-    if (!tweening && !idle && !dirty && !simHot) return;
+    if (flash && now - flash.t0 >= TUNE.live.flashMs) { flash = null; dirty = true; }
+    if (!tweening && !idle && !dirty && !simHot && !flash) return;
     if (S.view === 'orbit') {
       if (S.motion && !S.sel) orbitAngle += dt * TUNE.orbit.speed;
       projectAll();
@@ -1237,6 +1297,22 @@
     const m = G.meta;
     const built = new Date(m.built);
     el.append(document.createTextNode('built ' + fmtTime(built) + ' · ' + m.nodes + ' nodes, ' + m.links + ' links'));
+    // Live state first: the stamp truncates from the right on narrow windows.
+    const items = [];
+    if (live && live.down) items.push(h('span', 'stale', '! server not answering since ' + fmtTime(live.down) + ', showing ' + fmtTime(built)));
+    else if (live && live.error) {
+      const s = h('span', 'stale', '! rebuild failed, showing the last good graph');
+      s.title = live.error;
+      items.push(s);
+    }
+    if (delta && Date.now() - delta.at < TUNE.live.noteMs) {
+      const parts = [];
+      if (delta.added.length) parts.push('+' + delta.added.length + ' new');
+      if (delta.changed.length) parts.push(delta.changed.length + ' changed');
+      if (delta.removed.length) parts.push(delta.removed.length + ' removed');
+      if (parts.length) items.push(h('span', 'upd', 'updated ' + fmtTime(new Date(delta.at)) + ': ' + parts.join(', ')));
+    }
+    for (const it of items) el.append(document.createTextNode(' · '), it);
     if (m.last_snapshot) {
       const ls = new Date(m.last_snapshot);
       const age = Math.floor((Date.now() - ls.getTime()) / 86400000);
@@ -1256,10 +1332,7 @@
       el.append(document.createTextNode(' · '));
       el.append(h('span', 'stale', 'synthetic data'));
     }
-    if (refreshErr) {
-      el.append(document.createTextNode(' · '));
-      el.append(h('span', 'stale', '! refresh failed ' + fmtTime(refreshErr) + ', showing ' + fmtTime(built)));
-    }
+    el.title = el.textContent;
   }
 
   function syncToggles() {
@@ -1381,7 +1454,7 @@
       showError(e);
     }
     requestAnimationFrame(frame);
-    setInterval(refresh, TUNE.data.refreshMs);
+    live = follow();
     setInterval(renderStamp, 1000);
   }
   boot();

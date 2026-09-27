@@ -6,14 +6,24 @@ Agentic-OS experiments on the Surrey desktop. The first piece is **brain map**:
 a read-only local viewer for the tiered Markdown memory system (global store,
 per-project stores, skills, the root `CLAUDE.md`), modelled on the Screen
 layer's brain panel in pavrus117/ai-os-maps-guide. The Markdown files are the
-store; the graph is a view rebuilt on every request, never written back.
-Neo4j (via `memtool.py graph --cypher`) stays an optional second view of the
-same data.
+store; the graph is a view the server rebuilds whenever they change, never
+written back. Neo4j (via `memtool.py graph --cypher`) stays an optional
+second view of the same data.
 
 `docs/brainmap-spec.md` is the rebuild specification for the isolated work
 environment, which is reproduced by specification only, never by copying
-files. Keep it in step with behaviour changes here, and keep it free of
-anything machine- or project-specific.
+files; `docs/live-refresh-recipe.md` is the step-by-step recipe for the live
+refresh (hooks, server, pages, verification). Keep both in step with
+behaviour changes here, and keep them free of anything machine- or
+project-specific.
+
+**Live refresh** (2026-09-26): the global hook `~/.claude/hooks/memory_signal.py`
+(PostToolUse on Write/Edit/MultiEdit/NotebookEdit/Bash/PowerShell, and Stop,
+both `async`, registered in `~/.claude/settings.json` next to the snapshot
+Stop hook) rewrites `~/.claude/memory.signal` when memory may have changed.
+The server stats that marker every 0.5 s, stat-walks each built source every
+5 s, and rebuilds hourly; pages poll `/api/version` every 2 s while visible.
+The hook lives in `~/.claude`, not this repo, and the snapshot job backs it up.
 
 Four renderers over the same `/api/brain` JSON, switchable in the header:
 `/` Canvas 2D (d3 maths, hand-drawn), `/gpu` sigma.js WebGL 2D, `/3d`
@@ -28,7 +38,15 @@ served as extra sources for load testing.
 # Setup (first time only). Stdlib only, nothing to pip install.
 py -3 -m venv .venv
 
-# Run: http://127.0.0.1:8770/ (port from ~/.claude/port-registry.md)
+# Autostart (installed 2026-09-26): per-user Scheduled Task "agenticos brain
+# map" runs .venv\Scripts\pythonw.exe brainmap\server.py --log logs\brainmap.log
+# at logon, windowless, with a one-minute watchdog trigger. Re-run to update;
+# -Remove to stop for good (killing the process only brings it back).
+.\scripts\autostart.ps1
+.\scripts\autostart.ps1 -Remove
+
+# Run: http://127.0.0.1:8770/ (port from ~/.claude/port-registry.md). With the
+# autostarted server up, this just opens the page.
 .\run.cmd
 .\run.cmd --snapshot C:\path\to\claude-env@murr2   # add another snapshot checkout
 
@@ -49,11 +67,11 @@ background tab: `__brainmap2d.bench()`, `__brainmapgpu.bench()`,
 
 | Path | Role |
 |---|---|
-| `brainmap/build.py` | Walks a source, emits `{meta, nodes, links, activity}`. Imports `~/.claude/skills/memory-system/memtool.py` for frontmatter, link resolution and ageing. |
-| `brainmap/server.py` | `ThreadingHTTPServer`: pages `/`, `/gpu`, `/3d`, `/orbit`; `/static/*`, `/api/sources`, `/api/brain`, `/api/file`. GET only. |
+| `brainmap/build.py` | Walks a source, emits `{meta, nodes, links, activity}`. Imports `~/.claude/skills/memory-system/memtool.py` for frontmatter, link resolution and ageing. `fingerprint()` is the stat-only change check over the same roots. |
+| `brainmap/server.py` | `ThreadingHTTPServer`: pages `/`, `/gpu`, `/3d`, `/orbit`; `/static/*`, `/api/sources`, `/api/brain`, `/api/version`, `/api/file`. GET only. One cached `Entry` per source; the `Watcher` thread rebuilds on the hooks' marker, a stat-walk difference, or the hourly clock. |
 | `brainmap/synth.py` | Deterministic synthetic graphs, same schema, Pareto-sized projects. No paths, so nothing to serve from `/api/file`. |
 | `brainmap/static/app.js` | Canvas renderer, six views (rings, circle, areas, links, timeline, 3d orbit), legend isolation, card, reader. Self-contained. |
-| `brainmap/static/common.js` | Shared by the two WebGL pages: palette, area model, legend, card, reader, GPU detection, context-loss banner. |
+| `brainmap/static/common.js` | Shared by the three WebGL pages: palette, area model, legend, card, reader, GPU detection, context-loss banner, live refresh (`follow`, `diff`, `liveItems`). |
 | `brainmap/static/gpu.js` | sigma.js + graphology; ForceAtlas2 in a web worker. |
 | `brainmap/static/3d.js` | 3d-force-graph; optional `shells` force puts each tier on its own sphere. |
 | `brainmap/static/orbit.js` | ES module on vendored three r183.2: polar parliament-fill layout, one `InstancedMesh` per kind, all links in one `LineSegments`, bloom, CSS2D badges with declutter, top and stack modes. |
@@ -95,12 +113,41 @@ Layers are the memory tiers: 0 root, 1 always-in-context (indexes, project
 - The viewer never writes to any store. **Why:** the files are authoritative
   and their mtime is the memory system's review clock; an accidental touch
   resets it.
-- `/api/file` serves only a path that belongs to a node in the freshly built
-  graph, and nodes exist only for `.md` and `.py`. No path is ever joined from
-  the request. **Why:** `settings.json` and MCP config under `~/.claude` carry
+- `/api/file` serves only a path that belongs to a node in the source's
+  current (server-built) graph, and nodes exist only for `.md` and `.py`; a
+  linked file must also resolve to one. No path is ever joined from the
+  request. **Why:** `settings.json` and MCP config under `~/.claude` carry
   secrets.
+- The graph version is a content hash of nodes, links and activity (not
+  `meta`), and an unchanged rebuild is discarded. **Why:** a counter would
+  restart with the server and could repeat a number for new content; the hash
+  also makes over-signalling free, so the hook filter can stay loose.
+- The server only stats `~/.claude/memory.signal`, never opens it; the marker
+  sits outside every store and every snapshot-managed directory. **Why:** an
+  open handle on Windows can fail the hook's write, and a marker inside
+  `hooks/` or `memory/` would make every signal a snapshot commit.
+- Successful `/api/version` polls are not logged. **Why:** one line per tab
+  every 2 s rotates the 3 MB log away within hours.
+- The page-side diff ignores age, health, overdue and the half-life flag.
+  **Why:** they drift daily by themselves; counting them would flash every
+  ageing node at each hourly rebuild.
+- The header stamp truncates (ellipsis) instead of wrapping. **Why:** a
+  wrapping update note changed the header height and resized the stage each
+  time it appeared and expired.
 - Bind loopback or a private/Tailscale address only; `0.0.0.0` and public IPs
   are refused, and a Host-header check blocks DNS rebinding.
+- The listening socket is exclusive (`SO_EXCLUSIVEADDRUSE`, no
+  `SO_REUSEADDR`), and a second launch that finds a brain map on the port
+  hands over (opens the page, exits 0). **Why:** on Windows the stdlib
+  default let a second server bind 8770 alongside the first and split the
+  traffic (reproduced 2026-09-26).
+- Logging goes through `logging`, to a rotating file with `--log`. **Why:**
+  under `pythonw` there is no stderr, so the stdlib request log and error
+  printer would raise on every request.
+- The autostart watchdog is its own repeating trigger, not a repetition on the
+  logon trigger. **Why:** a repetition on the logon trigger only arms after a
+  logon fires it, and Task Scheduler's "restart on failure" only covers
+  launch failures, not a process that dies later (both verified).
 - Content types for static files are pinned in `server.py`. **Why:** Windows
   `mimetypes` reads the registry, which can map `.js` to `text/plain`; with
   `nosniff` the browser then refuses the script.
@@ -158,6 +205,12 @@ is bound by draw calls (one mesh per node, one line per link), not by the
 GPU. The orbit page is the instanced answer: draw calls stay per-kind, and a
 full focus recolour at 50k costs 77 ms.
 
+Live refresh (2026-09-26, 46-node live store): fingerprint 2-4 ms, build
+56 ms (about 200 ms with the snapshot repo's `git log`). Memory write to new
+server version: about 1 s by the hook's signal, 2-5 s by the stat walk alone.
+The scratch-store end-to-end test (spec 14, recipe D2) passed 18/18, and the
+pre/post fingerprints matched on all four pages.
+
 ## Open questions / known gaps
 
 - Snapshot checkouts restore content but not mtimes, so global-store ages in a
@@ -165,5 +218,11 @@ full focus recolour at 50k costs 77 ms.
   carry harness-stamped `modified` and are accurate.
 - `~/projects/claude-env` is only as fresh as its last pull; the header marks
   it stale past 7 days.
+- Harness-stamped `metadata.modified` is UTC (`...Z`); memtool drops the zone
+  without converting, so those `changed` times read as local and can sit in
+  the future (seen on linknode-com facts). A memtool issue, not the viewer's.
+- Testing live updates in an automation-driven Chrome tab: it reports
+  `document.hidden`, so pages never poll. Override the property to false in
+  the test; expect throttled timers.
 - Repo: private, `murr2k/agenticos` on GitHub. Update `CHANGELOG.md`
   `[Unreleased]` with each change before pushing.

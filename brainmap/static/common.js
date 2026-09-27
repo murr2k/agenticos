@@ -1,6 +1,7 @@
-/* common.js - shared by the WebGL pages (/gpu, /3d): tokens and palette,
-   area model, legend, card, reader, sources, header stamp, GPU detection.
-   The canvas page (app.js) predates this and keeps its own copy. */
+/* common.js - shared by the WebGL pages (/gpu, /3d, /orbit): tokens and
+   palette, area model, legend, card, reader, sources, header stamp, GPU
+   detection, live refresh. The canvas page (app.js) predates this and keeps
+   its own copy. */
 window.BM = (function () {
   'use strict';
 
@@ -131,6 +132,7 @@ window.BM = (function () {
       el.append(document.createTextNode(' · '));
       el.append(x);
     }
+    el.title = el.textContent;       // the stamp truncates on narrow windows
   }
 
   function legend(el, nodes, model, colorBy, tok, iso, onIso) {
@@ -270,6 +272,80 @@ window.BM = (function () {
     if (b) b.textContent = t === 'dark' ? 'light' : 'dark';
   }
 
+  /* -- live refresh ------------------------------------------------------------
+     The server keeps each source's graph current and gives it a content
+     version. Pages poll that while visible and re-fetch the graph only when
+     it moves, then keep their view and flash what changed. */
+
+  // A node apart from the clock: age, health and the half-life flag drift
+  // by themselves every day and are not a change to the memory.
+  const SIG_KEYS = ['kind', 'label', 'area', 'layer', 'tier', 'type', 'volatility', 'path', 'note', 'changed', 'lines'];
+  function nodeSig(n) {
+    return JSON.stringify(SIG_KEYS.map((k) => (n[k] == null ? null : n[k]))
+      .concat([(n.flags || []).filter((f) => !/half-life/.test(f))]));
+  }
+  function diff(before, after) {
+    const old = new Map(before.map((n) => [n.id, nodeSig(n)]));
+    const added = [], changed = [], seen = new Set();
+    for (const n of after) {
+      seen.add(n.id);
+      const s = old.get(n.id);
+      if (s == null) added.push(n.id);
+      else if (s !== nodeSig(n)) changed.push(n.id);
+    }
+    const removed = before.filter((n) => !seen.has(n.id)).map((n) => n.id);
+    return { added, changed, removed, at: Date.now() };
+  }
+  function deltaText(d) {
+    const parts = [];
+    if (d.added.length) parts.push('+' + d.added.length + ' new');
+    if (d.changed.length) parts.push(d.changed.length + ' changed');
+    if (d.removed.length) parts.push(d.removed.length + ' removed');
+    return parts.join(', ');
+  }
+
+  /* Poll /api/version for the page's source every o.everyMs while the tab is
+     visible, and at once when it becomes visible. o.version() is the version
+     on screen; o.onChange() re-fetches. Returns the status the stamp reads:
+     down (first failed poll since the last good one) and error (the server's
+     last rebuild failure; it keeps serving the last good graph). */
+  function follow(o) {
+    const st = { down: null, error: null };
+    let busy = false;
+    async function poll() {
+      if (document.hidden || busy || !o.version()) return;
+      busy = true;
+      const src = o.src();
+      try {
+        const v = await fetchJSON('/api/version?src=' + encodeURIComponent(src));
+        st.down = null;
+        st.error = v.error || null;
+        if (src === o.src() && v.version && v.version !== o.version()) await o.onChange();
+      } catch (e) {
+        if (!st.down) st.down = new Date();
+      } finally {
+        busy = false;
+      }
+    }
+    setInterval(poll, o.everyMs);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+    return st;
+  }
+  function liveItems(st, delta, noteMs) {
+    const out = [];
+    const hm = (d) => new Date(d).toTimeString().slice(0, 5);
+    if (st && st.down) out.push(h('span', 'warn', '! server not answering since ' + hm(st.down)));
+    else if (st && st.error) {
+      const s = h('span', 'warn', '! rebuild failed, showing the last good graph');
+      s.title = st.error;
+      out.push(s);
+    }
+    if (delta && Date.now() - delta.at < noteMs && deltaText(delta)) {
+      out.push(h('span', 'upd', 'updated ' + hm(delta.at) + ': ' + deltaText(delta)));
+    }
+    return out;
+  }
+
   /* Frame-time meter: median of the last 30 samples, so one GC pause does not
      read as the steady state. */
   function meter() {
@@ -285,5 +361,6 @@ window.BM = (function () {
   }
 
   return { $, h, esc, KIND_LABEL, HEALTH, prefs, tokens, areaModel, colorOf, fetchJSON, sources,
-    gpuInfo, shortGpu, banner, watchContext, stamp, legend, matchesIso, card, openFile, theme, meter };
+    gpuInfo, shortGpu, banner, watchContext, stamp, legend, matchesIso, card, openFile, theme, meter,
+    diff, follow, liveItems };
 })();

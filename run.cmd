@@ -1,6 +1,8 @@
 @echo off
 rem Brain map: read-only viewer for the tiered memory stores.
 rem Extra args go to server.py, e.g.  run.cmd --snapshot C:\path\to\claude-env@murr2
+rem If the autostarted server (scripts\autostart.ps1) already owns the port,
+rem this just opens the page; extra args then have no effect.
 setlocal
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" (

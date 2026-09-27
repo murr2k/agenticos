@@ -1,7 +1,7 @@
 """build.py - walk the tiered memory stores and emit the brain-map graph.
 
 The graph is derived, never authoritative: the Markdown files are the store
-and this is a view, rebuilt on every request and safe to throw away.
+and this is a view, rebuilt whenever they change and safe to throw away.
 Frontmatter parsing, link resolution and ageing are delegated to memtool.py
 so the memory schema keeps exactly one reader.
 
@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -288,6 +290,75 @@ def _activity(repo: Path | None) -> tuple[list, str | None]:
                 d["cats"].update(c.strip() for c in m.group(2).split(","))
     rows = [dict(v, cats=sorted(v["cats"])) for _, v in sorted(days.items())]
     return rows, last
+
+
+# --------------------------------------------------------------------------
+# change detection
+# --------------------------------------------------------------------------
+
+def _stamp(path: str, st) -> bytes:
+    # POSIX ctime moves on any metadata change, so it also catches an edit
+    # whose mtime was put back; on Windows st_ctime is the creation time.
+    ctime = st.st_ctime_ns if os.name != "nt" else 0
+    return f"{path}|{st.st_size}|{st.st_mtime_ns}|{ctime}\n".encode()
+
+
+def fingerprint(src: Source) -> str:
+    """Digest of the name, size and times of every file build() reads, never
+    their contents: the server's cheap "did anything change?" check. It walks
+    the same roots as build(). Directory listings carry each entry's stat
+    data (os.scandir), so on Windows the walk costs no extra call per file."""
+    h = hashlib.sha1()
+
+    def file(p: Path):
+        try:
+            h.update(_stamp(str(p), p.stat()))
+        except OSError:
+            h.update(f"{p}|-\n".encode())
+
+    def tree(d: Path):
+        """Every *.md below d, as memtool's store walk sees them."""
+        try:
+            with os.scandir(d) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            return
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    tree(Path(e.path))
+                elif e.name.lower().endswith(".md"):
+                    h.update(_stamp(e.path, e.stat()))
+            except OSError:
+                continue
+
+    def subdirs(d: Path | None) -> list:
+        try:
+            with os.scandir(d) as it:
+                return sorted((e for e in it if e.is_dir()), key=lambda e: e.name)
+        except (OSError, TypeError):
+            return []
+
+    file(src.root_md)
+    try:
+        root_text = src.root_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        root_text = ""
+    for rest in sorted(set(TILDE_PATH.findall(root_text))):
+        p = src.resolve_claude(rest)
+        if p is not None:
+            file(p)
+    tree(src.global_store)
+    for d in subdirs(src.skills):
+        file(Path(d.path) / "SKILL.md")
+    for d in subdirs(src.project_stores):
+        if not src.store_prefix or d.name.startswith(src.store_prefix):
+            tree(Path(d.path) / "memory")
+    for d in subdirs(src.projects_dir):
+        file(Path(d.path) / "CLAUDE.md")
+    if src.activity_repo is not None:
+        file(src.activity_repo / ".git" / "logs" / "HEAD")    # appended by every commit and pull
+    return h.hexdigest()
 
 
 def build(src: Source) -> dict:

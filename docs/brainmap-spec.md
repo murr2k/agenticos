@@ -16,10 +16,10 @@ section 14.
 
 ## 1. Non-negotiables
 
-1. **Read-only.** The Markdown files are the store. The graph is derived on
-   every request and never written back. The viewer must not open any store
-   file for writing, touch it, or change its mtime: mtime is the memory
-   system's review clock.
+1. **Read-only.** The Markdown files are the store. The graph is derived from
+   them (rebuilt whenever they change, section 4.6) and never written back.
+   The viewer must not open any store file for writing, touch it, or change
+   its mtime: mtime is the memory system's review clock.
 2. **Local only.** Bind loopback (or a private address), never a public or
    wildcard address. No cookies, no login, no third-party JavaScript, no CDN.
    Every library is a vendored local file.
@@ -29,16 +29,20 @@ section 14.
    only exceptions (a blob worker, three library style blocks and one import
    map, each allowed narrowly) and why.
 5. **The file route cannot be steered.** It serves only the file behind a node
-   in the graph it just built, and nodes exist only for `.md` and `.py`. No path
-   is ever joined from request input. Config files that carry secrets
-   (`settings.json`, MCP config) can never become nodes.
+   in the source's current graph (built by the server from the store), and
+   nodes exist only for `.md` and `.py`; a node whose file is a link must also
+   resolve to `.md` or `.py`. No path is ever joined from request input.
+   Config files that carry secrets (`settings.json`, MCP config) can never
+   become nodes.
 6. **A visualizer, not an execution interface.** On the reference guide's
    three-level scale (1: a graph you look at; 2: panels that read your real
    files; 3: buttons that run things) this is deliberately Level 2. No route,
    button or shortcut runs, schedules, edits or triggers anything; the only
    actions are open (read), copy path and fly to. Execution stays in the
    Claude Code CLI. Adding a Level 3 control would break rules 1 and 5 by
-   construction, so it is out of scope, not merely deferred.
+   construction, so it is out of scope, not merely deferred. The live-refresh
+   hooks (4.6) do not change this: they run inside Claude Code, write only a
+   marker file outside every store, and the viewer only stats that file.
 
 ---
 
@@ -108,7 +112,7 @@ One document per source, served by `/api/brain`:
 
 ```
 { meta: { source, label, built, root, nodes, links, last_snapshot,
-          activity_repo, synthetic? },
+          activity_repo, synthetic?, version },
   nodes: [ Node ],
   links: [ { s, t, kind } ],
   activity: [ { day: "YYYY-MM-DD", runs, files, cats: [..] } ] }
@@ -187,10 +191,12 @@ and on index nodes `dead entry: x` (index lists a file that does not exist).
 | `/orbit` | WebGL orbital disc page (instanced three.js) |
 | `/static/<path>` | only files present under `static/` at startup (a fixed whitelist map, built once) |
 | `/api/sources` | `[ {key, label} ]` |
-| `/api/brain?src=KEY` | the graph, built fresh on every call |
+| `/api/brain?src=KEY` | the source's current graph (4.6), with `meta.version` |
+| `/api/version?src=KEY` | `{src, version, built, checked, error}`: the current version, when that content was first built, when a rebuild last confirmed it, and the last rebuild's failure (null when fine) |
 | `/api/file?src=KEY&id=NODE` | `{id, path (rel), truncated, text}` for that node's file; 512 KB cap |
 
-Unknown route, source or node: 404 JSON. Compact JSON (no spaces).
+Unknown route, source or node: 404 JSON. A source whose very first build
+fails: 500 JSON with the reason. Compact JSON (no spaces).
 
 ### 4.2 Security and headers
 
@@ -238,6 +244,93 @@ socket is bound (from the server, not from the script, or the browser races
 the bind), and on failure prints a setup hint and pauses. Take the port from
 the local port registry if one is kept (the reference build used 8770); do
 not default to 3000/5000/8000/8080/8888.
+
+The server owns its port exclusively (`SO_EXCLUSIVEADDRUSE` on Windows, no
+`SO_REUSEADDR`). If the bind fails and a brain map already answers
+`/api/sources` on that address, the new launch hands over: it opens the page
+if asked and exits 0, so the launcher still works while an autostarted
+instance is running. Otherwise it exits non-zero with the reason. All output
+goes through `logging`: to stderr normally, to a rotating file with
+`--log FILE` (1 MB x 3), and never through a bare stderr write. The watcher
+thread (4.6) starts only after the bind succeeds, so a launch that hands over
+never builds anything.
+
+### 4.5 Autostart (optional)
+
+A per-user scheduled task, installed and removed by one script, that runs the
+server with the windowless interpreter (`pythonw.exe`) and `--log`, in the
+user's own session (no administrator rights, no stored password):
+
+- a logon trigger to start it;
+- a separate trigger that starts now and repeats every minute indefinitely,
+  as the watchdog, with "if already running, do not start a new instance",
+  so the repeat is free while the server is up and restarts it within a
+  minute if it dies;
+- no execution time limit (the default would kill it after three days).
+
+Stopping it for good means removing or disabling the task; killing the
+process only brings it back. Starting before anyone logs on would need an
+elevated task that runs without an interactive session; for a viewer that
+nobody can look at before logging on, logon is equivalent.
+
+### 4.6 Live refresh
+
+The graph is computed when the memory changes, not when a page asks, and
+pages learn about it by polling a tiny version route. Three layers, each
+cheap, each covering what the one before it cannot see. The build procedure
+is in `docs/live-refresh-recipe.md`; this is the contract.
+
+**Per-source cache.** Each source holds its current graph as one immutable
+record (graph, its encoded JSON body, version, first-built time), swapped
+whole so a reader never sees half an update. Requests serve the record as it
+stands and never wait for a rebuild, except the very first build of a source,
+which happens on first request under a per-source lock (two first requests
+build once). The live source is built at startup by the watcher, so the first
+page load is instant. `/api/file` resolves nodes against this current graph.
+
+**Version = content hash.** A rebuild hashes the nodes, links and activity
+(not `meta`, which carries the build time and counts), SHA-256, first 16 hex
+characters. An unchanged hash discards the rebuild: the version, body and
+built time stay, only `checked` moves. A hash, unlike a counter, survives
+server restarts: a page holding a version from before a restart does not
+reload for nothing, and one holding stale content always does.
+
+**Layer 1, the hooks' signal.** The Claude Code hooks (recipe, part A) rewrite
+one marker file, by default `~/.claude/memory.signal`, whenever an event could
+have changed the memory. The server stats it (size and mtime, never opening
+it) every 0.5 s. A change schedules a rebuild of every built source that is
+not synthetic. Latency from a memory write to a new version is about 1 s.
+
+**Layer 2, the stat walk.** Every 5 s the server fingerprints each built
+source: a hash of the path, size and mtime (plus ctime on POSIX) of every file
+the builder reads, walking the same roots as the builder (root instructions
+and the files it mentions, every `*.md` under the global store and each
+project store, each skill's `SKILL.md`, each project's `CLAUDE.md`, and the
+activity repo's `.git/logs/HEAD`). It never reads contents except the root
+file, for its mentions. A different fingerprint schedules a rebuild. This
+catches what no hook sees: another editor, a sync, a `git pull` of a snapshot.
+The fingerprint is taken just before each build, so a file that changes while
+the build runs shows up on the next walk.
+
+**Layer 3, the clock.** Any built source not rebuilt for an hour is rebuilt,
+so ages, health and the half-life flags follow the clock (an age in whole days
+ticks at each file's own time of day, not at midnight).
+
+**Settling.** The first change opens a 0.4 s window; one rebuild covers every
+change inside it (a `/remember` writes a fact and then its index line). A
+failed rebuild keeps serving the last good graph, records the error for
+`/api/version`, and records the fingerprint it failed on, so it retries on the
+next change rather than every walk.
+
+**Constants** (server limits, so they live in the server, not a page's
+`TUNE`): marker tick 0.5 s, walk 5 s, settle 0.4 s, clock rebuild 3600 s. The
+marker path is a command-line option (`--signal FILE`).
+
+**Logging.** Changed versions are logged with the reason (`signal`,
+`files changed`, `clock`, `first request`), node and link counts and build
+time; unchanged rebuilds are not. Successful `/api/version` polls are not
+logged either: each open tab polls every 2 s, which would rotate the real log
+away within hours.
 
 ---
 
@@ -324,10 +417,11 @@ nodes neutral).
 - Header bar: brand; renderer switch (canvas, webgl 2d, webgl 3d, orbit) as links;
   source select; colour-by segment; search box; display toggles; a right-aligned
   stamp.
-- Stamp: `built HH:MM`, node and link counts, snapshot age (marked with `!` and
-  the warning colour when older than 7 days), frame cost, GPU name on WebGL
-  pages, and `synthetic data` when applicable. A failed refresh shows
-  `! refresh failed HH:MM, showing HH:MM` rather than hiding old data.
+- Stamp: `built HH:MM`, node and link counts, the live-update notes (6.5),
+  snapshot age (marked with `!` and the warning colour when older than 7
+  days), frame cost, GPU name on WebGL pages, and `synthetic data` when
+  applicable. When the server stops answering it says so and keeps showing
+  the old data rather than hiding it.
 - Legend panel bottom-left: area (or review status) with swatches and counts,
   kinds with shape icons, memory types, and an edge key. Clicking an entry
   isolates it (others dim or hide); clicking again or "clear" resets. With
@@ -348,8 +442,8 @@ nodes neutral).
   the isolation; `f` fit; canvas page also `1`-`6` views, `n` names, `m` motion.
 - Preferences (source, view, colour mode, toggles, theme) in `localStorage`,
   every access wrapped in try/catch; the page must work without it.
-- Refresh every 60 s while visible; re-ingest only when a signature of
-  (ids, changed, flag counts, health, link count) differs, keeping positions.
+- Live update: poll the server's version while visible and re-fetch only
+  when it moves, keeping the view (6.5).
 - **Load sequencing:** each load takes a sequence number; a response that
   arrives after a newer load started is discarded.
 
@@ -370,6 +464,58 @@ synthetic source with motion off: hashes of the rendered pixels per view for
 the canvas and orbit pages, and hashes of every node's size, colour and label,
 every edge and every renderer setting for the sigma page, and of the resolved
 configuration for the 3D page.
+
+### 6.5 Live update
+
+Every page follows the server's version (4.6) and keeps its view when the
+graph changes. The timings are in each page's `TUNE.live` group.
+
+- **Poll** `/api/version?src=<source>` every 2 s while the tab is visible,
+  and immediately when it becomes visible. A hidden tab never polls (and its
+  timers are throttled anyway). Skip a poll while one is in flight, and
+  ignore an answer for a source that is no longer the page's.
+- **Fetch only on change.** When the version differs from `meta.version` on
+  screen, fetch `/api/brain`. An update never supersedes a user-started load
+  (source switch): it takes the current load sequence number without
+  advancing it and drops its result if a load started meanwhile.
+- **Diff what changed** against the graph on screen: added, removed, and
+  changed ids, where changed compares kind, label, area, layer, tier, type,
+  volatility, path, note, changed time, body lines and flags, but not age,
+  health, overdue or the half-life flag. Those drift by themselves every day;
+  including them would flash every ageing node at each clock rebuild.
+- **Keep the view.** Camera, selection (re-bound by id; the card re-renders or
+  closes if the node is gone), legend isolation (dropped if nothing matches)
+  and search stay. Per renderer:
+  - Canvas: re-ingest; every node tweens from its old position to its new
+    target, new ones from the centre. No refit.
+  - sigma: patch the graphology graph in place. Drop gone nodes, clear and
+    re-add edges, merge attributes into remaining nodes (positions untouched),
+    and start each new node at the mean position of its already-placed
+    neighbours plus a small jitter, else at its area seed. Do not restart
+    ForceAtlas2.
+  - 3D: new node objects that copy x, y, z from the old ones (d3-force keeps
+    given positions); new nodes start beside a placed neighbour. The layout
+    reheats and re-settles near where it was; auto-fit is suppressed.
+  - Orbit: the layout is deterministic, so lay out and build the scene again
+    and keep the camera. The disc may grow or shrink slightly with the node
+    count; the camera does not move.
+- **Flash what changed** (added plus changed) for 6 s: the canvas draws
+  rings that grow and fade each second; sigma blinks the nodes through its
+  highlighted state (the hover ring and label box); 3D blinks them to ink
+  (steady above 5k nodes, where each blink restyles every object); orbit turns
+  them ink (which blooms in the dark theme) and pulses their size, and a
+  badged hub or the root pulses its HTML label with a CSS animation whose
+  period comes from `TUNE` through a custom property. Under
+  `prefers-reduced-motion`, every flash is steady.
+- **Say so in the header.** "updated HH:MM: +N new, N changed, N removed"
+  for 2 minutes; "! server not answering since HH:MM" after a failed poll;
+  "! rebuild failed, showing the last good graph" (the error as its tooltip)
+  when `/api/version` reports one. Put these first in the stamp, right after
+  the build time and counts, because the stamp truncates from the right: it
+  takes the space the bar leaves and ellipsizes instead of wrapping (minimum
+  14em, below which the bar wraps as before), with its full text as a
+  tooltip. A wrapping stamp would change the header's height, and with it
+  the stage size, each time a note appears or expires.
 
 ---
 
@@ -783,6 +929,50 @@ hashes, so record whichever bytes you serve.
     `arc()` throws a negative-radius error that kills the render loop. Scale
     the eye distance with the largest shell (7.2). Found by the
     deterministic fingerprint run, not by eye.
+18. **Windows: two servers on one port.** The stdlib HTTP server sets
+    `SO_REUSEADDR`, which on Windows lets a second process bind a port that
+    is already listening; both then accept, and requests split between them.
+    Use `SO_EXCLUSIVEADDRUSE` and no reuse flag (4.4).
+19. **pythonw has no stderr.** `sys.stderr` is `None`, so the stdlib request
+    log and error printer raise on every request. Route everything through
+    `logging` with a file handler (4.4).
+20. **Scheduled-task watchdog that never fires.** "Restart on failure" covers
+    only a task that fails to launch, not a process that dies later; and a
+    repetition attached to a logon trigger arms only after a logon fires it
+    (a task started by hand has no next run). Use a separate time trigger
+    that repeats indefinitely (4.5). Both verified by killing the server.
+21. **Stat walks miss mtime-preserving edits.** The memory system restores a
+    file's mtime when it re-tiers or re-files (mtime is its review clock).
+    A re-tier still changes the size (`hot` to `cold`) or the path, so the
+    walk sees it; a same-size edit with the mtime put back is invisible to
+    it on Windows, which exposes no change time. The hook's signal catches
+    it (4.6, layer 1). On POSIX, include `st_ctime` in the fingerprint:
+    setting times moves it. Verified: the walk missed such an edit, the
+    signal caught it in 1 s.
+22. **Version counters restart.** A counter that restarts with the server
+    can repeat an old number for new content, and a page holding it never
+    reloads. Use a content hash as the version (4.6).
+23. **Clock drift reads as change.** Age, health and the half-life flag move
+    by themselves daily; a naive diff flashes every ageing node at each
+    hourly rebuild. Leave them out of the page-side diff, but in the
+    server's version, so the display still updates (6.5).
+24. **Polls flood the log.** At one poll per tab every 2 s, logging each
+    `/api/version` answer rotates the 3 MB log away within hours. Skip
+    successful polls in the request log (4.6).
+25. **The marker and Windows file sharing.** A reader holding the marker
+    open (a normal open does not share delete) can make the hook's write or
+    replace fail. The server only stats it; the hook writes it in place and
+    swallows any error (recipe, part A).
+26. **A growing header resizes the stage.** The stamp wrapped onto a second
+    header line when the update note appeared, shrinking the stage (and
+    resizing the canvas) until the note expired. Let the stamp truncate with
+    an ellipsis instead of wrapping (6.5).
+27. **Hidden tabs in automated tests.** A browser tab driven by an automation
+    extension can report `document.hidden` even while it is being
+    screenshotted, so the pages rightly never poll and a live-update test
+    sees nothing. Override the property in the test (`hidden` to false);
+    expect throttled timers (updates in 5 to 15 s instead of 2) because the
+    tab really is hidden.
 
 ---
 
@@ -805,6 +995,12 @@ sigma 50k load to first render 2.4 s including a 20 MB fetch; orbit 50k load
 to first frame under 1.8 s, and a full focus recolour (every instance plus
 106k link colours) 77 ms. Draw calls on the orbit page are per kind plus the
 bloom passes, independent of node count.
+
+Live refresh (4.6), on the 46-node live store: stat fingerprint 2 to 4 ms,
+full build 56 ms (about 200 ms including the snapshot repo's `git log`).
+Memory write to new server version: about 1 s by the hooks' signal, 2 to
+5 s by the stat walk alone. A visible page shows it within one more poll
+(2 s).
 
 Reading it:
 
@@ -852,6 +1048,37 @@ Server:
 - Binding `0.0.0.0` or a public address: refused at startup.
 - After a full session of use, no store file's mtime has changed.
 
+Live refresh (against a scratch store and a scratch marker, never the real
+store; the recipe, part D, has the procedure):
+
+- `/api/version` answers `{src, version, built, checked, error}`, and
+  `/api/brain` carries the same version in `meta`.
+- A new fact plus its index line: new version within the walk interval
+  plus the settle window (under 6 s), without any signal.
+- A no-op signal: `checked` moves, the version does not.
+- A re-tier into `cold/` with the mtime kept: new version, the node's kind is
+  `detail` and its layer 3.
+- A same-size edit with the mtime restored: no new version from the walk
+  (on Windows); a signal then produces one within about 1 s.
+- A deletion: new version, the node gone.
+- The same content across a server restart has the same version.
+- Successful polls do not appear in the log; version changes do, with a
+  reason.
+- Each page, with the tab made visible: after a change it updates without a
+  reload, the camera state is identical before and after, the new node is
+  present and flashing, the header shows the update note on one line, and
+  the page still has exactly one renderer (canvas count unchanged) and no
+  console errors.
+- Deterministic fingerprints (6.4) are unchanged by the live-refresh code:
+  it must not alter a first render.
+
+Hooks (recipe, part A): pipe-test the signal script with JSON-encoded
+payloads for each tool and event (edit inside and outside the stores, a
+`CLAUDE.md` anywhere, a settings file, shell commands with and without a
+store hint, a tool outside the matcher, `Stop`, invalid and empty input).
+Every case exits 0 with no output, and only the expected ones bump the
+marker.
+
 Graph:
 
 - Live counts match the memory tool's own store listing (hot and cold per
@@ -890,7 +1117,8 @@ Canvas page (`app.js`):
 
 | Group | Keys and defaults |
 |---|---|
-| `data` | refreshMs 60000, staleDays 7 |
+| `data` | staleDays 7 |
+| `live` | pollMs 2000, flashMs 6000, pulseMs 1000, ringPx 12, noteMs 120000 |
 | `node` | base 3.2, slope 1.7, rootMin 13, coldScale 0.8, zoomMin 0.55, zoomMax 2.6, timelineScale 0.7 |
 | `areas` | tagAllUpTo 40, tagTop 30 |
 | `rings` | gapMax 0.06, gapShare 0.4, minArc 24, step 105, tagPad 30 |
@@ -917,6 +1145,7 @@ WebGL 2D page (`gpu.js`):
 | `hover` | gapPx 6, padPx 4, cornerPx 4, ringGapPx 4, ringWidth 1.5 |
 | `camera` | minRatio 0.005, maxRatio 20, stagePadPx 40, flyRatio 0.12, flyMs 700, fitMs 500 |
 | `layout` | barnesHutOver 1500, stopMs 4000, stopMsMid 9000, stopMsBig 30000, midOver 2000, bigOver 12000 |
+| `live` | pollMs 2000, flashMs 6000, blinkMs 500, bornJitter 8, noteMs 120000 |
 
 WebGL 3D page (`3d.js`):
 
@@ -930,6 +1159,7 @@ WebGL 3D page (`3d.js`):
 | `link` | opacity 0.28, opacityBig 0.14, opacityHuge 0.08, hotWidth 0.8, particles 2, particlesMaxLinks 200, particleWidth 1.6, particleSpeed 0.006 |
 | `sim` | charge -60, chargeBig -25, chargeHuge -12, velocityDecay 0.3, warmupTicks 120, cooldownMs 12000, cooldownBigMs 18000, cooldownHugeMs 25000 |
 | `camera` | fitTicks 40, fitMs 700, fitStopMs 900, fitPadPx 40, flyDistance 90, flyMs 1200, autoRotateSpeed 0.5 |
+| `live` | pollMs 2000, flashMs 6000, blinkMs 500, bornJitter 6, noteMs 120000 |
 
 Orbit page (`orbit.js`):
 
@@ -943,3 +1173,4 @@ Orbit page (`orbit.js`):
 | `labels` | badgeAreas 30, maxNames 400, ringPad 10, runsPad 30, rootOffset 20, hubLift 3, ringLift 2, nameLift 2, badgeCharPx 7, badgePadPx 26, badgeAnchorPx 8, nameCharPx 5.6, namePadPx 6, boxHalfPx 8 |
 | `pick` | minPx 7, padPx 4, clickMovePx 5, tipNoteChars 150 |
 | `frame` | legendPx 250, cardPx 360, wideMinPx 900 |
+| `live` | pollMs 2000, flashMs 6000, pulseMs 900, pulseGain 1.2, noteMs 120000 |

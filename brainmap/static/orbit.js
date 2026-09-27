@@ -143,6 +143,13 @@ const TUNE = Object.freeze({
     legendPx: 250, cardPx: 360,   // panels the disc is centred away from ...
     wideMinPx: 900,               // ... on viewports at least this wide
   },
+  live: {
+    pollMs: 2000,                 // ask the server for its version while the tab is visible
+    flashMs: 6000,                // changed nodes pulse this long after an update
+    pulseMs: 900,                 // one pulse (also the badge animation period)
+    pulseGain: 1.2,               // a pulse grows a dot by up to this x its size
+    noteMs: 120000,               // "updated ..." stays in the header this long
+  },
 });
 let spacing = TUNE.layout.spacingMin;   // set per graph by layout()
 
@@ -154,7 +161,9 @@ let stackE = S.stack ? 1 : 0, stackTween = null, camTween = null;
 let dirty = true, projDirty = true, proj = null, loadSeq = 0;
 let W = 1, H = 1, pointer = null, downAt = null;
 let frames = 0, fps = 0, fpsT = performance.now(), calls = 0;
+let live = null, delta = null, flash = null;   // poll status, last change, { ids, nodes, t0 } while pulsing
 const gpu = BM.gpuInfo();
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // -- renderer, camera, controls, post-processing ------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -564,7 +573,7 @@ function recolor() {
   const dim = new THREE.Color(tok.axis);
   for (const n of data.nodes) {
     const on = !active || active.has(n.id);
-    n.mesh.setColorAt(n.ix, on ? _c.set(colorOf(n)) : dim);
+    n.mesh.setColorAt(n.ix, on ? _c.set(flash && flash.ids.has(n.id) ? tok.ink : colorOf(n)) : dim);
   }
   for (const k in meshes) meshes[k].instanceColor.needsUpdate = true;
   const col = linkLines.geometry.attributes.color.array;
@@ -808,6 +817,44 @@ function declutter() {
   }
 }
 
+// -- live update pulse ------------------------------------------------------------------
+/* After a live update the changed nodes turn ink (which blooms in the dark
+   theme) and pulse in size; a badged hub or the root pulses its CSS label
+   instead, since its mesh is hidden. Reduced motion keeps the colour only. */
+function startFlash(ids) {
+  endFlash();
+  if (!ids.length) return;
+  const set = new Set(ids);
+  flash = { ids: set, nodes: data.nodes.filter((n) => set.has(n.id)), t0: performance.now() };
+  for (const o of labels) {
+    if (!o.userData.node || !flash.ids.has(o.userData.node.id)) continue;
+    o.element.style.setProperty('--pulse', TUNE.live.pulseMs + 'ms');
+    o.element.classList.add('flash');
+  }
+  recolor();
+}
+function endFlash() {
+  if (!flash) return;
+  flash = null;
+  for (const o of labels) o.element.classList.remove('flash');
+  if (world) { applyPositions(); recolor(); }
+}
+function pulse(t) {
+  const Lv = TUNE.live;
+  const k = 1 + Lv.pulseGain * 0.5 * (1 - Math.cos((2 * Math.PI * t) / Lv.pulseMs));
+  const touched = new Set();
+  for (const n of flash.nodes) {
+    if (n.badged || n.kind === 'root') continue;
+    _p.set(n.px, n.y, n.pz);
+    _s.setScalar(n.size * k);
+    _m.compose(_p, _q, _s);
+    n.mesh.setMatrixAt(n.ix, _m);
+    touched.add(n.mesh);
+  }
+  for (const m of touched) m.instanceMatrix.needsUpdate = true;
+  dirty = true;
+}
+
 // -- render loop ----------------------------------------------------------------------
 function renderNow() {
   renderer.info.reset();
@@ -831,6 +878,11 @@ renderer.setAnimationLoop((now) => {
     stackE = stackTween.from + (stackTween.to - stackTween.from) * t;
     applyPositions();
     if (t >= 1) stackTween = null;
+  }
+  if (flash) {
+    const t = now - flash.t0;
+    if (t >= TUNE.live.flashMs) endFlash();
+    else if (!reduceMotion) pulse(t);
   }
   controls.autoRotate = S.motion && !S.sel && !camTween;
   if (controls.update()) { dirty = projDirty = true; declutterDue = true; }
@@ -860,7 +912,7 @@ function renderStamp() {
   extra.push(document.createTextNode(document.hidden ? 'paused (tab hidden)' : fps ? fps + ' fps' : 'idle'));
   extra.push(document.createTextNode(calls + ' draw calls'));
   if (data.meta.synthetic) extra.push(BM.h('span', 'warn', 'synthetic data'));
-  BM.stamp($('#stamp'), data.meta, extra);
+  BM.stamp($('#stamp'), data.meta, BM.liveItems(live, delta, TUNE.live.noteMs).concat(extra));
 }
 function syncToggles() {
   for (const [id, on] of [['#t-top', S.top], ['#t-stack', S.stack], ['#t-names', S.names], ['#t-glow', S.glow], ['#t-motion', S.motion]]) {
@@ -879,21 +931,29 @@ function resize() {
   viewOffset();
 }
 
-async function load() {
+/* keep: a live update of the same source. The layout is deterministic, so
+   the disc is simply laid out and built again; the camera, selection,
+   isolation and search stay, and what changed pulses. */
+async function load(keep) {
   const my = ++loadSeq;
-  S.iso = null; S.sel = null; S.hover = null; active = null;
-  $('#card').hidden = true;
-  $('#empty').hidden = false;
-  $('#empty').textContent = 'loading...';
+  if (!keep) {
+    endFlash(); delta = null;
+    S.iso = null; S.sel = null; S.hover = null; active = null;
+    $('#card').hidden = true;
+    $('#empty').hidden = false;
+    $('#empty').textContent = 'loading...';
+  }
   let fresh;
   try {
     fresh = await BM.fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
   } catch (e) {
-    if (my === loadSeq) $('#empty').textContent = 'Could not load the graph: ' + e.message;
-    return;
+    if (my === loadSeq && !keep) $('#empty').textContent = 'Could not load the graph: ' + e.message;
+    return;                         // an update simply waits for the next poll
   }
   // A newer load started while this one was fetching; drop the stale graph.
   if (my !== loadSeq) return;
+  const before = keep && data ? data.nodes : null;
+  if (keep) endFlash();
   data = fresh;
   $('#empty').hidden = data.nodes.length > 0;
   $('#empty').textContent = 'No memory files found in this source.';
@@ -904,9 +964,19 @@ async function load() {
   for (const l of data.links) { adj.get(l.s).push([l.t, l]); adj.get(l.t).push([l.s, l]); }
   layout();
   build();
-  renderLegend();
-  viewOffset();
-  fit(0);
+  if (before) {
+    S.hover = null;
+    S.sel = S.sel ? byId.get(S.sel.id) || null : null;
+    if (S.iso && !data.nodes.some((n) => BM.matchesIso(n, S.iso))) S.iso = null;
+    renderLegend();
+    select(S.sel, false);           // re-renders the card, re-derives the focus, re-centres
+    delta = BM.diff(before, data.nodes);
+    startFlash(delta.added.concat(delta.changed));
+  } else {
+    renderLegend();
+    viewOffset();
+    fit(0);
+  }
   renderStamp();
 }
 
@@ -991,6 +1061,7 @@ async function boot() {
     return;
   }
   await load();
+  live = BM.follow({ src: () => S.src, version: () => data && data.meta.version, onChange: () => load(true), everyMs: TUNE.live.pollMs });
   setInterval(renderStamp, 1000);
 }
 boot();

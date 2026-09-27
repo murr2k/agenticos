@@ -16,7 +16,9 @@
   };
   let tok = {}, model = null, data = null, graph = null, renderer = null;
   let fa2 = null, fa2Timer = null, focus = new Set(), matches = null, t0 = 0, watch = null;
+  let live = null, delta = null, flash = new Set(), flashOn = false, flashTimer = null;
   const meter = BM.meter();
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const gpu = BM.gpuInfo();
 
   /* -- tuning -------------------------------------------------------------------
@@ -57,6 +59,13 @@
       stopMs: 4000, stopMsMid: 9000, stopMsBig: 30000,    // auto-stop after ...
       midOver: 2000, bigOver: 12000,                      // ... by node count
     },
+    live: {
+      pollMs: 2000,                 // ask the server for its version while the tab is visible
+      flashMs: 6000,                // changed nodes blink this long after an update
+      blinkMs: 500,                 // on / off period of the blink
+      bornJitter: 8,                // a new node starts this far from its neighbours' mean
+      noteMs: 120000,               // "updated ..." stays in the header this long
+    },
   });
 
   const save = () => BM.prefs.set('gpu', { src: S.src, colorBy: S.colorBy, labels: S.labels, theme: S.theme });
@@ -93,20 +102,52 @@
   function buildGraph() {
     graph = new UndirectedGraph();
     const rnd = mulberry(TUNE.seed.prng);
-    const big = data.nodes.length > TUNE.bands.big;
     // `type` is sigma's program selector, so the memory type stays inside raw.
     for (const n of data.nodes) {
       const [x, y] = seed(n, rnd);
       graph.addNode(n.id, { x, y, label: n.label, raw: n });
     }
+    addEdges();
+    styleNodes();
+  }
+  function addEdges() {
+    const big = data.nodes.length > TUNE.bands.big;
     for (const l of data.links) {
       if (graph.hasNode(l.s) && graph.hasNode(l.t) && !graph.hasEdge(l.s, l.t)) graph.addEdge(l.s, l.t, { kind: l.kind, size: big ? TUNE.size.edgeBig : TUNE.size.edge });
     }
+  }
+  function styleNodes() {
+    const big = data.nodes.length > TUNE.bands.big;
     graph.updateEachNodeAttributes((id, a) => {
       a.size = sizeFor(a.raw, graph.degree(id), big);
       a.color = colorOf(a.raw);
       return a;
     });
+  }
+
+  /* A live update: patch the graph in place so the layout and the camera
+     stay. Nodes that remain keep their positions, gone ones are dropped, and
+     new ones start beside the mean of their placed neighbours. */
+  function patchGraph() {
+    const keep = new Set(data.nodes.map((n) => n.id));
+    for (const id of graph.nodes()) if (!keep.has(id)) graph.dropNode(id);
+    graph.clearEdges();
+    const rnd = mulberry(TUNE.seed.prng);
+    const born = new Set();
+    for (const n of data.nodes) {
+      if (graph.hasNode(n.id)) graph.mergeNodeAttributes(n.id, { label: n.label, raw: n });
+      else { const [x, y] = seed(n, rnd); graph.addNode(n.id, { x, y, label: n.label, raw: n }); born.add(n.id); }
+    }
+    addEdges();
+    const j = TUNE.live.bornJitter;
+    for (const id of born) {
+      const nb = graph.neighbors(id).filter((m) => !born.has(m));
+      if (!nb.length) continue;
+      let x = 0, y = 0;
+      for (const m of nb) { x += graph.getNodeAttribute(m, 'x'); y += graph.getNodeAttribute(m, 'y'); }
+      graph.mergeNodeAttributes(id, { x: x / nb.length + j * (rnd() - 0.5), y: y / nb.length + j * (rnd() - 0.5) });
+    }
+    styleNodes();
   }
 
   function recolor() {
@@ -145,7 +186,10 @@
   const idle = () => !S.iso && !focus.size && !matches;
 
   function nodeReducer(id, attr) {
-    if (idle() && S.labels) return attr;
+    // A changed node blinks after a live update: drawn highlighted (the
+    // hover ring and label box) on the "on" half of each period.
+    const lit = flashOn && flash.has(id);
+    if (idle() && S.labels && !lit) return attr;
     const n = attr.raw;
     if (S.iso && !BM.matchesIso(n, S.iso)) return Object.assign({}, attr, { hidden: true });
     const res = Object.assign({}, attr);
@@ -156,6 +200,7 @@
       if (matches.has(id)) { res.zIndex = 2; res.forceLabel = matches.size < TUNE.labels.forceMatches; }
       else { res.color = tok.axis; res.label = ''; }
     }
+    if (lit) { res.highlighted = true; res.forceLabel = true; res.zIndex = 3; }
     if (!S.labels && !res.forceLabel) res.label = '';
     return res;
   }
@@ -270,7 +315,7 @@
     const ms = meter.get();
     if (ms != null) extra.push(document.createTextNode('render ' + ms.toFixed(1) + ' ms'));
     if (data.meta.synthetic) extra.push(BM.h('span', 'warn', 'synthetic data'));
-    BM.stamp($('#stamp'), data.meta, extra);
+    BM.stamp($('#stamp'), data.meta, BM.liveItems(live, delta, TUNE.live.noteMs).concat(extra));
   }
   function syncToggles() {
     $('#t-labels').setAttribute('aria-pressed', String(S.labels));
@@ -283,6 +328,7 @@
     stopLayout();
     if (renderer) { watch.abort(); renderer.kill(); renderer = null; }
     S.iso = null; S.sel = null; S.hover = null; focus = new Set(); matches = null;
+    endFlash(); delta = null;
     $('#card').hidden = true;
     $('#empty').hidden = false;
     $('#empty').textContent = 'loading...';
@@ -306,6 +352,59 @@
     startLayout();
   }
 
+  // The server has a newer version: patch it in, keep the view, blink what
+  // changed. A load (source switch) started meanwhile wins.
+  async function update() {
+    const my = loadSeq;
+    let fresh;
+    try {
+      fresh = await BM.fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
+    } catch (e) {
+      return;                       // the next poll tries again
+    }
+    if (my !== loadSeq || !graph || !renderer) return;
+    const d = BM.diff(data.nodes, fresh.nodes);
+    data = fresh;
+    model = BM.areaModel(data.nodes);
+    patchGraph();
+    if (S.hover && !graph.hasNode(S.hover)) S.hover = null;
+    if (S.iso && !data.nodes.some((n) => BM.matchesIso(n, S.iso))) S.iso = null;
+    findMatches();
+    $('#empty').hidden = data.nodes.length > 0;
+    renderLegend();
+    if (S.sel && graph.hasNode(S.sel)) select(S.sel);
+    else select(null);
+    delta = d;
+    startFlash(d.added.concat(d.changed));
+    renderStamp();
+  }
+
+  function startFlash(ids) {
+    endFlash();
+    if (!ids.length) return;
+    flash = new Set(ids);
+    flashOn = true;
+    const t0 = performance.now(), L = TUNE.live;
+    flashTimer = setInterval(() => {
+      if (performance.now() - t0 >= L.flashMs) { endFlash(); return; }
+      if (!reduceMotion) { flashOn = !flashOn; renderer.refresh({ skipIndexation: true }); }
+    }, L.blinkMs);
+    renderer.refresh({ skipIndexation: true });
+  }
+  function endFlash() {
+    clearInterval(flashTimer);
+    const had = flash.size;
+    flash = new Set(); flashOn = false;
+    if (had && renderer) renderer.refresh({ skipIndexation: true });
+  }
+
+  function findMatches() {
+    matches = null;
+    if (!S.query) return;
+    matches = new Set();
+    for (const n of data.nodes) if ((n.label + ' ' + (n.note || '') + ' ' + n.area).toLowerCase().includes(S.query)) matches.add(n.id);
+  }
+
   document.querySelectorAll('#colorby button').forEach((b) => b.addEventListener('click', () => {
     S.colorBy = b.dataset.color; S.iso = null;
     syncToggles(); recolor(); renderLegend(); save();
@@ -324,11 +423,7 @@
   $('#source').addEventListener('change', (ev) => { S.src = ev.target.value; save(); load(); });
   $('#search').addEventListener('input', (ev) => {
     S.query = ev.target.value.trim().toLowerCase();
-    matches = null;
-    if (S.query) {
-      matches = new Set();
-      for (const n of data.nodes) if ((n.label + ' ' + (n.note || '') + ' ' + n.area).toLowerCase().includes(S.query)) matches.add(n.id);
-    }
+    findMatches();
     renderer.refresh({ skipIndexation: true });
   });
   $('#search').addEventListener('keydown', (ev) => {
@@ -380,6 +475,7 @@
       return;
     }
     await load();
+    live = BM.follow({ src: () => S.src, version: () => data && data.meta.version, onChange: update, everyMs: TUNE.live.pollMs });
     setInterval(() => { if (data) renderStamp(); }, 1000);
   }
   boot();

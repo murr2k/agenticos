@@ -3,7 +3,9 @@
 Agentic-OS experiments. The first piece is **brain map**: a read-only, local
 viewer for a tiered Markdown memory system (the root `CLAUDE.md`, a global
 memory store, per-project stores, skills). The Markdown files are the store;
-the graph is rebuilt from them on every request and never written back.
+the graph is rebuilt from them whenever they change and never written back.
+Open pages follow along: a new or re-tiered memory appears within a few
+seconds, the view stays where it is, and what changed flashes.
 
 It is a visualizer, not an execution interface: the only actions are open
 (read-only), copy path and fly to. Execution stays in the Claude Code CLI.
@@ -37,6 +39,35 @@ py -3 -m venv .venv
 .\run.cmd --host <tailscale-ip>             # view from another device on your tailnet
 ```
 
+To start it automatically at logon, windowless, with a watchdog that
+restarts it within a minute if it dies:
+
+```powershell
+.\scripts\autostart.ps1            # install (per-user Scheduled Task) and start now
+.\scripts\autostart.ps1 -Remove    # stop and uninstall
+```
+
+It logs to `logs\brainmap.log`. With it running, `run.cmd` just opens the
+page.
+
+## Live refresh
+
+The server keeps each source's graph in memory and rebuilds it when:
+
+1. a Claude Code hook signals that memory may have changed (about 1 s);
+2. a stat walk of the stores (names, sizes, mtimes; every 5 s) finds a
+   difference, which covers edits no hook saw;
+3. an hour has passed, so ages and review health follow the clock.
+
+A rebuild whose content hash is unchanged is discarded. Pages poll
+`/api/version` every 2 s while visible and re-fetch only when it moves.
+
+The hook is a small script in `~/.claude/hooks/` that rewrites
+`~/.claude/memory.signal`, registered for `PostToolUse` (file edits and shell
+calls) and `Stop` in the user-level `~/.claude/settings.json`. Without it the
+viewer still refreshes through the stat walk, only more slowly.
+`docs/live-refresh-recipe.md` describes how to build and verify all of it.
+
 The builder reads the memory schema through `memtool.py` from the
 memory-system skill (`~/.claude/skills/memory-system/`), which must be
 present.
@@ -52,7 +83,7 @@ for the GPU: `__brainmap2d.bench()`, `__brainmapgpu.bench()`,
 - **Local only.** Binds loopback or a private/Tailscale address; public and
   wildcard binds are refused; a Host-header check blocks DNS rebinding.
 - **An unsteerable file route.** It serves only the file behind a node in the
-  graph it just built, and only `.md` and `.py`.
+  current graph the server built from the store, and only `.md` and `.py`.
 - **No third-party requests.** Every library is vendored; strict CSP with
   narrowly scoped, hash-based exceptions.
 - **One tuning block per page.** Every speed, count, size and threshold lives
@@ -63,10 +94,11 @@ for the GPU: `__brainmap2d.bench()`, `__brainmapgpu.bench()`,
 | Path | What |
 |---|---|
 | `brainmap/build.py` | Walks the stores and emits the graph JSON |
-| `brainmap/server.py` | Stdlib HTTP server: pages, static files, three read-only API routes |
+| `brainmap/server.py` | Stdlib HTTP server: pages, static files, four read-only API routes, the per-source graph cache and its watcher |
 | `brainmap/synth.py` | Deterministic synthetic graphs for load testing |
 | `brainmap/static/` | The four pages, shared helpers, styles, vendored libraries |
 | `docs/brainmap-spec.md` | Complete rebuild specification, including tuning defaults, failure modes and acceptance tests |
+| `docs/live-refresh-recipe.md` | Step-by-step recipe for the live refresh: hooks, server, pages, verification |
 | `CLAUDE.md` | Project notes: invariants, measurements, open questions |
 | `CHANGELOG.md` | Release history |
 

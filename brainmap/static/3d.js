@@ -57,10 +57,19 @@
       flyDistance: 90, flyMs: 1200,
       autoRotateSpeed: 0.5,
     },
+    live: {
+      pollMs: 2000,                 // ask the server for its version while the tab is visible
+      flashMs: 6000,                // changed nodes blink this long after an update
+      blinkMs: 500,                 // on / off period (steady above bands.big: each blink restyles every node)
+      bornJitter: 6,                // a new node starts this far from a placed neighbour
+      noteMs: 120000,               // "updated ..." stays in the header this long
+    },
   });
   let tok = {}, model = null, data = null, G = null, byId = new Map(), adj = new Map();
   let focus = new Set(), hotLinks = new Set(), matches = null, moved = false, watch = null, ticks = 0;
+  let live = null, delta = null, flash = new Set(), flashOn = false, flashTimer = null;
   const gpu = BM.gpuInfo();
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let fps = null;
 
   const save = () => BM.prefs.set('3d', { src: S.src, colorBy: S.colorBy, shells: S.shells, motion: S.motion, theme: S.theme });
@@ -87,6 +96,7 @@
   }
 
   function nodeColor(n) {
+    if (flashOn && flash.has(n.id)) return tok.ink;
     if (focus.size) return focus.has(n.id) ? colorOf(n) : tok.axis;
     if (matches) return matches.has(n.id) ? colorOf(n) : tok.axis;
     return colorOf(n);
@@ -115,10 +125,11 @@
     }
   }
 
-  function make() {
-    const n = size();
-    const B = TUNE.bands, Nd = TUNE.node, Lk = TUNE.link, Sm = TUNE.sim;
-    const big = n > B.big, huge = n > B.huge;
+  /* The library's node and link objects for data. With prev (the last
+     byId), nodes that remain keep their positions, which d3-force leaves
+     alone, and new ones start beside a placed neighbour. */
+  function prepare(prev) {
+    const Nd = TUNE.node;
     const nodes = data.nodes.map((d) => Object.assign({}, d));
     byId = new Map(nodes.map((d) => [d.id, d]));
     const links = data.links.filter((l) => byId.has(l.s) && byId.has(l.t))
@@ -126,8 +137,28 @@
     adj = new Map(nodes.map((d) => [d.id, []]));
     for (const l of links) { adj.get(l.source).push([l.target, l]); adj.get(l.target).push([l.source, l]); }
     for (const d of nodes) d.val = d.kind === 'root' ? Nd.rootVal : 1 + adj.get(d.id).length * Nd.valPerLink;
+    if (prev) {
+      for (const d of nodes) {
+        const o = prev.get(d.id);
+        if (o && o.x != null) { d.x = o.x; d.y = o.y; d.z = o.z; }
+      }
+      const j = () => TUNE.live.bornJitter * (Math.random() - 0.5);
+      for (const d of nodes) {
+        if (d.x != null) continue;
+        const m = adj.get(d.id).map(([id]) => byId.get(id)).find((x) => x.x != null);
+        if (m) { d.x = m.x + j(); d.y = m.y + j(); d.z = m.z + j(); }
+      }
+    }
     const root = byId.get('root');
     if (root) { root.fx = 0; root.fy = 0; root.fz = 0; }
+    return { nodes, links };
+  }
+
+  function make() {
+    const n = size();
+    const B = TUNE.bands, Nd = TUNE.node, Lk = TUNE.link, Sm = TUNE.sim;
+    const big = n > B.big, huge = n > B.huge;
+    const { nodes, links } = prepare(null);
 
     G = new ForceGraph3D(el, { controlType: 'orbit' })
       .width(stage.clientWidth).height(stage.clientHeight)
@@ -224,7 +255,7 @@
     if (document.hidden) extra.push(document.createTextNode('paused (tab hidden)'));
     else if (fps != null) extra.push(document.createTextNode(fps + ' fps'));
     if (data.meta.synthetic) extra.push(BM.h('span', 'warn', 'synthetic data'));
-    BM.stamp($('#stamp'), data.meta, extra);
+    BM.stamp($('#stamp'), data.meta, BM.liveItems(live, delta, TUNE.live.noteMs).concat(extra));
   }
   function syncToggles() {
     $('#t-shells').setAttribute('aria-pressed', String(S.shells));
@@ -246,6 +277,7 @@
   let loadSeq = 0;
   async function load() {
     const my = ++loadSeq;
+    endFlash(); delta = null;
     if (G) { watch.abort(); G.pauseAnimation(); G._destructor(); el.replaceChildren(); G = null; }
     S.iso = null; S.sel = null; S.hover = null; focus = new Set(); hotLinks = new Set(); matches = null; moved = false; ticks = 0;
     $('#card').hidden = true;
@@ -274,6 +306,63 @@
     renderStamp();
   }
 
+  // The server has a newer version: hand the library the new graph with the
+  // old positions, keep the camera, blink what changed. A load (source
+  // switch) started meanwhile wins.
+  async function update() {
+    const my = loadSeq;
+    let fresh;
+    try {
+      fresh = await BM.fetchJSON('/api/brain?src=' + encodeURIComponent(S.src));
+    } catch (e) {
+      return;                       // the next poll tries again
+    }
+    if (my !== loadSeq || !G) return;
+    const d = BM.diff(data.nodes, fresh.nodes);
+    data = fresh;
+    model = BM.areaModel(data.nodes);
+    const gd = prepare(byId);
+    moved = true;                   // the view is kept: no auto-fit as the layout re-settles
+    S.hover = null;
+    S.sel = S.sel ? byId.get(S.sel.id) || null : null;
+    if (S.iso && !data.nodes.some((n) => BM.matchesIso(n, S.iso))) S.iso = null;
+    findMatches();
+    $('#empty').hidden = data.nodes.length > 0;
+    G.graphData(gd);
+    renderLegend();
+    select(S.sel, false);
+    delta = d;
+    startFlash(d.added.concat(d.changed));
+    renderStamp();
+  }
+
+  function startFlash(ids) {
+    endFlash();
+    if (!ids.length) return;
+    flash = new Set(ids);
+    flashOn = true;
+    restyle();
+    const t0 = performance.now(), L = TUNE.live;
+    const blink = !reduceMotion && size() <= TUNE.bands.big;
+    flashTimer = setInterval(() => {
+      if (performance.now() - t0 >= L.flashMs) { endFlash(); return; }
+      if (blink) { flashOn = !flashOn; restyle(); }
+    }, L.blinkMs);
+  }
+  function endFlash() {
+    clearInterval(flashTimer);
+    const had = flash.size;
+    flash = new Set(); flashOn = false;
+    if (had && G) restyle();
+  }
+
+  function findMatches() {
+    matches = null;
+    if (!S.query) return;
+    matches = new Set();
+    for (const n of data.nodes) if ((n.label + ' ' + (n.note || '') + ' ' + n.area).toLowerCase().includes(S.query)) matches.add(n.id);
+  }
+
   document.querySelectorAll('#colorby button').forEach((b) => b.addEventListener('click', () => {
     S.colorBy = b.dataset.color; S.iso = null;
     syncToggles(); renderLegend(); save(); restyle();
@@ -290,11 +379,7 @@
   $('#source').addEventListener('change', (ev) => { S.src = ev.target.value; save(); load(); });
   $('#search').addEventListener('input', (ev) => {
     S.query = ev.target.value.trim().toLowerCase();
-    matches = null;
-    if (S.query) {
-      matches = new Set();
-      for (const n of data.nodes) if ((n.label + ' ' + (n.note || '') + ' ' + n.area).toLowerCase().includes(S.query)) matches.add(n.id);
-    }
+    findMatches();
     restyle();
   });
   $('#search').addEventListener('keydown', (ev) => {
@@ -332,6 +417,7 @@
       return;
     }
     await load();
+    live = BM.follow({ src: () => S.src, version: () => data && data.meta.version, onChange: update, everyMs: TUNE.live.pollMs });
     setInterval(() => { if (data) renderStamp(); }, 1000);
   }
   /* Console handle. bench() renders synchronously and waits on gl.finish(),
