@@ -99,6 +99,7 @@ for the GPU: `__brainmap2d.bench()`, `__brainmapgpu.bench()`,
 | `brainmap/static/` | The four pages, shared helpers, styles, vendored libraries |
 | `docs/brainmap-spec.md` | Complete rebuild specification, including tuning defaults, failure modes and acceptance tests |
 | `docs/live-refresh-recipe.md` | Step-by-step recipe for the live refresh: hooks, server, pages, verification |
+| `docs/memory-organization.md` | How the memory system treats time, truth and metadata: the discussion, what was changed, and a recipe to apply it |
 | `CLAUDE.md` | Project notes: invariants, measurements, open questions |
 | `CHANGELOG.md` | Release history |
 

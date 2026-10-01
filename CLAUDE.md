@@ -17,6 +17,13 @@ refresh (hooks, server, pages, verification). Keep both in step with
 behaviour changes here, and keep them free of anything machine- or
 project-specific.
 
+`docs/memory-organization.md` records the 2026-09-27 design decisions about
+the memory system itself (facts don't expire by date; no new metadata
+fields; salience by placement, provenance in wording; mtime-preserving
+maintenance) with a recipe to apply them. It came from a linknode-com
+session. Name memories there by category only: the repo is public, and
+several of them describe security-relevant facts.
+
 **Live refresh** (2026-09-26): the global hook `~/.claude/hooks/memory_signal.py`
 (PostToolUse on Write/Edit/MultiEdit/NotebookEdit/Bash/PowerShell, and Stop,
 both `async`, registered in `~/.claude/settings.json` next to the snapshot
@@ -224,5 +231,7 @@ pre/post fingerprints matched on all four pages.
 - Testing live updates in an automation-driven Chrome tab: it reports
   `document.hidden`, so pages never poll. Override the property to false in
   the test; expect throttled timers.
-- Repo: private, `murr2k/agenticos` on GitHub. Update `CHANGELOG.md`
-  `[Unreleased]` with each change before pushing.
+- Repo: public (since 2026-09-28, after a full-history secret scan),
+  `murr2k/agenticos` on GitHub. Update `CHANGELOG.md` `[Unreleased]` with
+  each change before pushing, and never commit anything from `~/.claude`
+  beyond what the docs describe: everything pushed here is world-readable.

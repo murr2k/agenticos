@@ -8,6 +8,10 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `docs/memory-organization.md`: the memory-organization decisions of
+  2026-09-27 (facts don't expire by date, volatility classification, no new
+  metadata fields, salience by placement, mtime-preserving maintenance), what
+  was changed, and a recipe for applying them to another store.
 - Live refresh. The server keeps one graph per source and rebuilds it in a
   background watcher when the Claude Code hooks' marker file changes, when a
   5-second stat walk of the stores finds a changed name, size or mtime, or
